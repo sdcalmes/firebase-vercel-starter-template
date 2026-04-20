@@ -16,8 +16,8 @@ This template stands up a production-ready Firebase + Vercel app in roughly an h
 | Database | **Firestore** | Realtime, security rules, no server to run. |
 | File storage | **Firebase Cloud Storage** | Rules-protected blob store. |
 | Background jobs | **Firebase Cloud Functions v2** (scheduler + Firestore triggers) | Cron + reactive hooks next to the data. |
-| Package manager | **Bun** | Fast installs, native TS runner for scripts. |
-| Tests | **Vitest** (unit/jsdom + rules + integration via emulator) | One runner, three project configs. |
+| Package manager | **Bun** (npm inside `functions/`) | Bun for the app; Cloud Functions use npm so Firebase CLI's built-in `predeploy` hook works unmodified. |
+| Tests | **Vitest** (unit/jsdom + rules + integration via emulator) | One runner, three project configs. Ships with a single seed unit test (`src/lib/rateLimitConfig.test.ts`) so CI passes out of the box — add your own alongside it. |
 | PWA + push | **Serwist** + **Web Push / VAPID** | Native install, notifications without FCM tokens. |
 | Rate limiting | **Upstash Redis** (optional, falls back to memory) | Cross-instance limits on serverless. |
 | Error monitoring | **Sentry** (optional) | Only uploads source maps on production builds. |
@@ -36,6 +36,13 @@ This template stands up a production-ready Firebase + Vercel app in roughly an h
 ├── next.config.ts              # Headers, image remotePatterns, Sentry wrapper
 ├── instrumentation.ts          # Next.js instrumentation entry (Sentry)
 ├── instrumentation-client.ts   # Browser Sentry init
+├── sentry.server.config.ts     # Sentry init for Node runtime
+├── sentry.edge.config.ts       # Sentry init for Edge runtime
+├── tsconfig.json               # TypeScript config (path alias @/* → src/*)
+├── eslint.config.mjs           # ESLint flat config (Next + security + vitest)
+├── postcss.config.mjs          # Tailwind v4 via @tailwindcss/postcss
+├── vitest.config.ts            # Three project configs: unit / rules / integration
+├── vitest.setup.ts             # jest-dom + jsdom patches for unit tests
 ├── functions/                  # Cloud Functions (separate package)
 │   ├── package.json            # Its own deps; node 24
 │   ├── src/index.ts            # onSchedule + onDocument* triggers
@@ -109,13 +116,13 @@ cp functions/.env.example functions/.env      # only if using Web Push
 
 Fill `.env.local` with the values from Step 1 — see the [Environment Variables](#environment-variables) reference below. For local dev you can leave `FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON` unset; the Admin SDK auto-targets the emulator.
 
-Update `.firebaserc` with your project IDs:
+Update `.firebaserc` with your project IDs. The file ships with `your-project-dev` / `your-project-prod` placeholders — replace both:
 
 ```json
 {
   "projects": {
-    "default": "my-app-dev",
-    "production": "my-app-prod"
+    "default": "your-project-dev",
+    "production": "your-project-prod"
   }
 }
 ```
@@ -152,7 +159,14 @@ bun run deploy:rules
 bun run deploy:functions
 ```
 
-Both scripts read `NEXT_PUBLIC_FIREBASE_PROJECT_ID` from `.env.prod` (git-ignored). Create that file alongside `.env.local` with the **production** project ID before first deploy.
+Both scripts read `NEXT_PUBLIC_FIREBASE_PROJECT_ID` from `.env.prod` (git-ignored). Create that file alongside `.env.local` with the **production** project ID before first deploy:
+
+```bash
+# .env.prod
+NEXT_PUBLIC_FIREBASE_PROJECT_ID="your-project-prod"
+```
+
+Under the hood, `deploy:firebase` runs `npm run build` inside `functions/` (not `bun run`) so Firebase CLI's default `predeploy` hook in `firebase.json` works without modification. The Functions package itself is small and rarely installs, so the Bun/npm split isn't a performance concern.
 
 **Functions-specific env.** Cloud Functions do not inherit your Vercel or `.env.local` values — they read `functions/.env` (bundled into the function at deploy time) or secrets set via `firebase functions:secrets:set`. For this stack that typically means VAPID keys:
 
@@ -182,6 +196,13 @@ Commit `functions/.env.example`; keep `functions/.env` git-ignored.
 | Firebase | Auth, Firestore, Storage, scheduled + reactive Cloud Functions, security rules, indexes. |
 
 You don't use Firebase Hosting at all. The client talks to Firebase via the public SDK; server code in Next.js API routes uses the Admin SDK with the service account.
+
+### Tooling notes
+
+- **Styling**: Tailwind v4 via `postcss.config.mjs` (uses `@tailwindcss/postcss`, no `tailwind.config.*` file needed).
+- **Linting**: ESLint flat config in `eslint.config.mjs` — extends `next/core-web-vitals`, `next/typescript`, plus `eslint-plugin-security` and `eslint-plugin-vitest`.
+- **TypeScript**: `tsconfig.json` defines the `@/*` path alias → `src/*`. `vitest.config.ts` mirrors this alias for tests.
+- **Service worker**: `src/app/sw.ts` is the source; Serwist builds it to `public/sw.js` on `next build`. The built file is git-ignored — never edit `public/sw.js` by hand.
 
 ## Step 6 — Verify
 
@@ -276,7 +297,23 @@ NEXT_PUBLIC_GOOGLE_CLIENT_ID         # Web OAuth client ID from GCP Credentials
 
 ## Scheduled Work (Cloud Functions)
 
-This template uses **Firebase Cloud Functions `onSchedule`** for all recurring work. The example in `functions/src/index.ts` runs every 15 minutes. Code runs next to Firestore (cheap reads, low latency) and uses the Admin SDK directly — no bearer-token auth hop.
+This template uses **Firebase Cloud Functions `onSchedule`** for all recurring work. Code runs next to Firestore (cheap reads, low latency) and uses the Admin SDK directly — no bearer-token auth hop.
+
+The example in `functions/src/index.ts`:
+
+```ts
+export const exampleSchedule = onSchedule("every 15 minutes", async () => {
+  // ...do work against db...
+});
+
+export const onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
+  // Firestore trigger fires when a new /users doc is created.
+});
+```
+
+The first argument to `onSchedule` accepts either **App Engine cron syntax** (`"every 15 minutes"`, `"every monday 09:00"`) or a **standard cron expression** (`"0 */6 * * *"`). See the [Cloud Scheduler docs](https://cloud.google.com/appengine/docs/flexible/scheduling-jobs-with-cron-yaml#schedule_format) for the full English-style grammar.
+
+To add a new scheduled job: export another `onSchedule(...)` const from `functions/src/index.ts`, then `bun run deploy:functions`. Each exported function becomes a separately deployed + schedulable unit.
 
 If you need a job that talks to external APIs at a fixed cadence and doesn't touch Firestore heavily, Vercel Cron is also a fine choice — but for this stack, prefer Cloud Functions.
 

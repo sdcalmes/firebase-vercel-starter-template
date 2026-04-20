@@ -17,6 +17,8 @@ firebase-export-*/
 
 # env files
 .env*
+!.env.example
+!functions/.env.example
 
 # service account
 *ServiceAccount.json
