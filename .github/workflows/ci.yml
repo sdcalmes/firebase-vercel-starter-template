@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint, Typecheck, Test & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Cache Next.js build
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**/*') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('bun.lock') }}-
+            ${{ runner.os }}-nextjs-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun x tsc --noEmit
+
+      - name: Unit tests with coverage
+        run: bun run vitest run --project unit --coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+      - name: Build
+        run: bun run build
+        env:
+          # CI placeholders — real values come from Vercel at deploy time.
+          NEXT_PUBLIC_FIREBASE_API_KEY: "ci-placeholder"
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: "ci-placeholder.firebaseapp.com"
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: "ci-placeholder"
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: "ci-placeholder.appspot.com"
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: "000000000000"
+          NEXT_PUBLIC_FIREBASE_APP_ID: "1:000000000000:web:ci"
+
+  integration:
+    name: Integration & Rules Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Java (required for Firebase emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Cache Firebase emulator
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/firebase/emulators
+          key: ${{ runner.os }}-firebase-emulators
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Firebase CLI
+        run: bun add -g firebase-tools
+
+      - name: Run integration & rules tests
+        run: firebase emulators:exec --only firestore "bun run test:rules && bun run test:integration"

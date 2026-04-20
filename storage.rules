@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Deny-all fallback
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Per-user upload area. 5 MB max, common image types only.
+    match /users/{userId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId &&
+        request.resource.size < 5 * 1024 * 1024 &&
+        request.resource.contentType in ['image/jpeg', 'image/png', 'image/webp'];
+    }
+  }
+}

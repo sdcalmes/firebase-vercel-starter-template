@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    // Checks the user's Firestore doc for role=='admin'. exists() short-circuits
+    // the non-admin path and avoids a billable get() on every request.
+    function isPlatformAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // ── Users ────────────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read: if request.auth != null;
+
+      // Block self-assigning role:'admin' on initial profile creation.
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && (!('role' in request.resource.data) || request.resource.data.role == 'user');
+
+      // Users can update their own doc but not the role field; admins can update any field.
+      allow update: if request.auth != null && (
+        (request.auth.uid == userId
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
+        isPlatformAdmin()
+      );
+
+      // No delete — user records are append-only. Route account deletion through
+      // a trusted Cloud Function or Admin SDK endpoint.
+    }
+
+    // Default: deny everything else. Add your collections above this line.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
